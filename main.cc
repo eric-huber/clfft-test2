@@ -10,6 +10,13 @@ const char* _data_file_name = "fft-data.txt";
 const char* _fft_file_name  = "fft-forward.txt";
 const char* _bak_file_name  = "fft-backward.txt";
 
+size_t              N = 8192;
+
+cl_context          _ctx = 0;
+cl_command_queue    _queue = NULL;
+clfftPlanHandle     _plan;
+cl_mem              _buf;
+
 void populate(size_t size, std::vector<float>& buf) {
     for (int i = 0; i < size * 2; ++i) {
         float t = i * .002;
@@ -46,22 +53,13 @@ void write_herm(std::string filename, std::vector<float>& buf) {
     ofs.close();   
 }
 
-int main( void )
-{
+void cl_init() {
     cl_int                  err;
     cl_platform_id          platform = 0;
     cl_device_id            device = 0;
     cl_context_properties   props[3] = { CL_CONTEXT_PLATFORM, 0, 0 };
-    cl_context              ctx = 0;
-    cl_command_queue        queue = 0;
-    cl_mem                  bufX;
-    std::vector<float>      X;
-    cl_event                event = NULL;
-    int                     ret = 0;
-    size_t                  N = 8192;
-
+    
     // FFT library realted declarations 
-    clfftPlanHandle planHandle;
     clfftDim dim = CLFFT_1D;
     size_t clLengths[1] = {N};
 
@@ -70,59 +68,76 @@ int main( void )
     err = clGetDeviceIDs( platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL );
 
     props[1] = (cl_context_properties)platform;
-    ctx = clCreateContext( props, 1, &device, NULL, NULL, &err );
-    queue = clCreateCommandQueue( ctx, device, 0, &err );
+    _ctx = clCreateContext( props, 1, &device, NULL, NULL, &err );
+    _queue = clCreateCommandQueue( _ctx, device, 0, &err );
 
     // Setup clFFT. 
     clfftSetupData fftSetup;
     err = clfftInitSetupData(&fftSetup);
     err = clfftSetup(&fftSetup);
-
-    // populate data
-    populate(N, X);
-    write(_data_file_name, X);
-
+    
     // Prepare OpenCL memory objects and place data inside them. 
-    bufX = clCreateBuffer( ctx, CL_MEM_READ_WRITE, N * 2 * sizeof(float), NULL, &err );
-
-    err = clEnqueueWriteBuffer( queue, bufX, CL_TRUE, 0,
-    N * 2 * sizeof(float), &X[0], 0, NULL, NULL );
+    _buf = clCreateBuffer( _ctx, CL_MEM_READ_WRITE, N * 2 * sizeof(float), NULL, &err );
 
     // Create a default plan for a complex FFT. 
-    err = clfftCreateDefaultPlan(&planHandle, ctx, dim, clLengths);
+    err = clfftCreateDefaultPlan(&_plan, _ctx, dim, clLengths);
 
     // Set plan parameters. 
-    err = clfftSetPlanPrecision(planHandle, CLFFT_SINGLE);
-    err = clfftSetLayout(planHandle, CLFFT_COMPLEX_INTERLEAVED, CLFFT_COMPLEX_INTERLEAVED);
-    err = clfftSetResultLocation(planHandle, CLFFT_INPLACE);
+    err = clfftSetPlanPrecision(_plan, CLFFT_SINGLE);
+    err = clfftSetLayout(_plan, CLFFT_COMPLEX_INTERLEAVED, CLFFT_COMPLEX_INTERLEAVED);
+    err = clfftSetResultLocation(_plan, CLFFT_INPLACE);
 
     // Bake the plan. 
-    err = clfftBakePlan(planHandle, 1, &queue, NULL, NULL);
+    err = clfftBakePlan(_plan, 1, &_queue, NULL, NULL);
+}
 
-    // Execute the plan. 
-    err = clfftEnqueueTransform(planHandle, CLFFT_FORWARD, 1, &queue, 0, NULL, NULL, &bufX, NULL, NULL);
-
-    // Wait for calculations to be finished. 
-    err = clFinish(queue);
-
-    // Fetch results of calculations. 
-    err = clEnqueueReadBuffer( queue, bufX, CL_TRUE, 0, N * 2 * sizeof(float), &X[0], 0, NULL, NULL );
-    write_herm(_fft_file_name, X);
-
+void cl_release() {
+    cl_int                  err;
+    
     // Release OpenCL memory objects. 
-    clReleaseMemObject( bufX );
-
-    X.empty();
+    clReleaseMemObject( _buf );
 
     // Release the plan. 
-    err = clfftDestroyPlan( &planHandle );
+    err = clfftDestroyPlan( &_plan );
 
     // Release clFFT library. 
     clfftTeardown( );
 
     // Release OpenCL working objects. 
-    clReleaseCommandQueue( queue );
-    clReleaseContext( ctx );
+    clReleaseCommandQueue( _queue );
+    clReleaseContext( _ctx );
+}
+
+int main( void )
+{
+    cl_int                  err;
+    
+    std::vector<float>      X;
+    cl_event                event = NULL;
+    int                     ret = 0;
+
+    cl_init();
+
+    // populate data
+    populate(N, X);
+    write(_data_file_name, X);
+
+    err = clEnqueueWriteBuffer( _queue, _buf, CL_TRUE, 0,
+              N * 2 * sizeof(float), &X[0], 0, NULL, NULL );
+
+    // Execute the plan. 
+    err = clfftEnqueueTransform(_plan, CLFFT_FORWARD, 1, &_queue, 0, NULL, NULL, &_buf, NULL, NULL);
+
+    // Wait for calculations to be finished. 
+    err = clFinish(_queue);
+
+    // Fetch results of calculations. 
+    err = clEnqueueReadBuffer( _queue, _buf, CL_TRUE, 0, N * 2 * sizeof(float), &X[0], 0, NULL, NULL );
+    write_herm(_fft_file_name, X);
+
+
+    X.empty();
+    cl_release();
 
     return ret;
 }

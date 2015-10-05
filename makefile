@@ -17,4 +17,4 @@ $(PROG): $(OBJS)
 all: $(PROG)
 
 clean:
-	rm -f $(OBJS) $(PROG)
+	rm -f $(OBJS) $(PROG) fft-*.txt
