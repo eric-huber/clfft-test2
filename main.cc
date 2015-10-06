@@ -1,6 +1,7 @@
 #include <vector>
 #include <iostream>
 #include <fstream>
+#include <random>
 #include <math.h>
 
 // No need to explicitely include the OpenCL headers 
@@ -10,22 +11,74 @@ const char* _data_file_name = "fft-data.txt";
 const char* _fft_file_name  = "fft-forward.txt";
 const char* _bak_file_name  = "fft-backward.txt";
 
-size_t              N = 8192;
+size_t              _fft_size = 8192;
 
-cl_context          _ctx = 0;
+float               _mean = 0.5;
+float               _std = 0.2;
+
+cl_context          _ctx = NULL;
 cl_command_queue    _queue = NULL;
 clfftPlanHandle     _plan_forward;
 clfftPlanHandle     _plan_backward;
 cl_mem              _buf;
 
-void populate(size_t size, std::vector<float>& buf) {
-    for (int i = 0; i < size * 2; ++i) {
+void populate_random(size_t size, std::vector<float>& buf) {
+    std::default_random_engine      generator(std::random_device{}());
+    std::normal_distribution<float> distribution(_mean, _std);
+    
+    srand(time(NULL));
+
+    for(int i = 0; i < size; i++) {
+        float number = distribution(generator);
+        buf[i] = number;
+    }
+}
+
+void populate_periodic(size_t size, std::vector<float>& buf) {
+    for (int i = 0; i < size; ++i) {
         float t = i * .002;
         float amp = sin(M_PI * t);
         amp += sin(2 * M_PI * t);
         amp += sin(3 * M_PI * t); 
-        buf.push_back(amp); 
+        buf[i] = amp; 
     }
+}
+
+void populate(size_t size, std::vector<float>& buf) {
+    populate_random(size, buf);
+}
+
+double rms(std::vector<float>& input, std::vector<float>& output) {
+    
+    double rms = 0;
+    
+    for (int i = 0; i < input.size(); ++i) {
+        rms += pow(output[i] - input[i], 2);
+    }
+    rms /= input.size() - 2;
+    rms = sqrt(rms);
+    return rms;
+}
+
+float signal_energy(std::vector<float>& input) {
+    double energy = 0;
+    for (int i = 0; i < input.size(); ++i) {
+        energy += pow(input[i], 2);
+    }
+    return energy;
+}
+
+double quant_error_energy(std::vector<float>& input, std::vector<float>& output) {
+    
+    double energy = 0;
+    for (int i = 0; i < input.size(); ++i) {
+        energy += pow(input[i] - output[i], 2);
+    }
+    return energy;
+}
+
+float signal_to_quant_error(std::vector<float>& input, std::vector<float>& output) {
+    return 10.0 * log10( signal_energy(input) / quant_error_energy(input, output) );
 }
 
 void write(std::string filename, std::vector<float>& buf) {
@@ -62,7 +115,7 @@ void cl_init() {
     
     // FFT library realted declarations 
     clfftDim dim = CLFFT_1D;
-    size_t clLengths[1] = {N};
+    size_t clLengths[1] = {_fft_size};
 
     // Setup OpenCL environment. 
     err = clGetPlatformIDs(1, &platform, NULL);
@@ -78,7 +131,7 @@ void cl_init() {
     err = clfftSetup(&fftSetup);
     
     // Prepare OpenCL memory objects and place data inside them. 
-    _buf = clCreateBuffer(_ctx, CL_MEM_READ_WRITE, N * 2 * sizeof(float), NULL, &err);
+    _buf = clCreateBuffer(_ctx, CL_MEM_READ_WRITE, _fft_size * 2 * sizeof(float), NULL, &err);
 
     // Create a default plan for a complex FFT going forward 
     err = clfftCreateDefaultPlan(&_plan_forward, _ctx, dim, clLengths);
@@ -122,25 +175,27 @@ void cl_release() {
 }
 
 size_t size() {
-    return N * 2 * sizeof(float);
+    //return _fft_size * 2 * sizeof(float);
+    return _fft_size * sizeof(float);
 }
 
 int main(void)
 {
     cl_int                  err;
     
-    std::vector<float>      X;
+    std::vector<float>      input(_fft_size);
+    std::vector<float>      output(_fft_size);
     cl_event                event = NULL;
     int                     ret = 0;
 
     cl_init();
 
     // populate data
-    populate(N, X);
-    write(_data_file_name, X);
+    populate(_fft_size, input);
+    write(_data_file_name, input);
 
     // Make data accessable by OpenCL
-    err = clEnqueueWriteBuffer(_queue, _buf, CL_TRUE, 0, size(), &X[0], 0, NULL, NULL);
+    err = clEnqueueWriteBuffer(_queue, _buf, CL_TRUE, 0, size(), &input[0], 0, NULL, NULL);
 
     // Execute the plan. 
     err = clfftEnqueueTransform(_plan_forward, CLFFT_FORWARD, 1, &_queue, 0, NULL, NULL, &_buf, NULL, NULL);
@@ -149,9 +204,9 @@ int main(void)
     err = clFinish(_queue);
 
     // Fetch results of calculations. 
-    err = clEnqueueReadBuffer(_queue, _buf, CL_TRUE, 0, size(), &X[0], 0, NULL, NULL);
-    write_herm(_fft_file_name, X);
-    
+    err = clEnqueueReadBuffer(_queue, _buf, CL_TRUE, 0, size(), &output[0], 0, NULL, NULL);
+    write_herm(_fft_file_name, output);
+
     // queue a reverse transform
     err = clfftEnqueueTransform(_plan_backward, CLFFT_BACKWARD, 1, &_queue, 0, NULL, NULL, &_buf, NULL, NULL);
 
@@ -159,11 +214,16 @@ int main(void)
     err = clFinish(_queue);
     
     // Fetch results of calculations. 
-    err = clEnqueueReadBuffer(_queue, _buf, CL_TRUE, 0, size(), &X[0], 0, NULL, NULL);
-    write(_bak_file_name, X);
+    err = clEnqueueReadBuffer(_queue, _buf, CL_TRUE, 0, size(), &output[0], 0, NULL, NULL);
+    write(_bak_file_name, output);
+
+    // check the results
+    std::cout << "SQER:   " << signal_to_quant_error(input, output) << std::endl;
+    std::cout << "RMS:    " << rms(input, output) << std::endl; 
 
     // Release resources
-    X.empty();
+    input.empty();
+    output.empty();
     cl_release();
 
     return ret;
