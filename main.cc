@@ -11,6 +11,8 @@ const char* _data_file_name = "fft-data.txt";
 const char* _fft_file_name  = "fft-forward.txt";
 const char* _bak_file_name  = "fft-backward.txt";
 
+typedef std::vector<float> float_v;
+
 size_t              _fft_size = 8192;
 
 float               _mean = 0.5;
@@ -22,7 +24,7 @@ clfftPlanHandle     _plan_forward;
 clfftPlanHandle     _plan_backward;
 cl_mem              _buf;
 
-void populate_random(size_t size, std::vector<float>& buf) {
+void populate_random(size_t size, float_v& buf) {
     std::default_random_engine      generator(std::random_device{}());
     std::normal_distribution<float> distribution(_mean, _std);
     
@@ -34,7 +36,7 @@ void populate_random(size_t size, std::vector<float>& buf) {
     }
 }
 
-void populate_periodic(size_t size, std::vector<float>& buf) {
+void populate_periodic(size_t size, float_v& buf) {
     for (int i = 0; i < size; ++i) {
         float t = i * .002;
         float amp = sin(M_PI * t);
@@ -44,23 +46,12 @@ void populate_periodic(size_t size, std::vector<float>& buf) {
     }
 }
 
-void populate(size_t size, std::vector<float>& buf) {
-    populate_random(size, buf);
+void populate(size_t size, float_v& buf) {
+    //populate_random(size, buf);
+    populate_periodic(size, buf);
 }
 
-double rms(std::vector<float>& input, std::vector<float>& output) {
-    
-    double rms = 0;
-    
-    for (int i = 0; i < input.size(); ++i) {
-        rms += pow(output[i] - input[i], 2);
-    }
-    rms /= input.size() - 2;
-    rms = sqrt(rms);
-    return rms;
-}
-
-float signal_energy(std::vector<float>& input) {
+float signal_energy(float_v& input) {
     double energy = 0;
     for (int i = 0; i < input.size(); ++i) {
         energy += pow(input[i], 2);
@@ -68,7 +59,7 @@ float signal_energy(std::vector<float>& input) {
     return energy;
 }
 
-double quant_error_energy(std::vector<float>& input, std::vector<float>& output) {
+double quant_error_energy(float_v& input, float_v& output) {
     
     double energy = 0;
     for (int i = 0; i < input.size(); ++i) {
@@ -77,11 +68,11 @@ double quant_error_energy(std::vector<float>& input, std::vector<float>& output)
     return energy;
 }
 
-float signal_to_quant_error(std::vector<float>& input, std::vector<float>& output) {
+float signal_to_quant_error(float_v& input, float_v& output) {
     return 10.0 * log10( signal_energy(input) / quant_error_energy(input, output) );
 }
 
-void write(std::string filename, std::vector<float>& buf) {
+void write(std::string filename, float_v& buf) {
     std::ofstream ofs;
     ofs.open(filename);
     
@@ -92,7 +83,7 @@ void write(std::string filename, std::vector<float>& buf) {
     ofs.close();   
 }
 
-void write_herm(std::string filename, std::vector<float>& buf) {
+void write_herm(std::string filename, float_v& buf) {
     std::ofstream ofs;
     ofs.open(filename);
     
@@ -179,20 +170,8 @@ size_t size() {
     return _fft_size * sizeof(float);
 }
 
-int main(void)
-{
+float basic_fft(float_v& input, float_v& output) {
     cl_int                  err;
-    
-    std::vector<float>      input(_fft_size);
-    std::vector<float>      output(_fft_size);
-    cl_event                event = NULL;
-    int                     ret = 0;
-
-    cl_init();
-
-    // populate data
-    populate(_fft_size, input);
-    write(_data_file_name, input);
 
     // Make data accessable by OpenCL
     err = clEnqueueWriteBuffer(_queue, _buf, CL_TRUE, 0, size(), &input[0], 0, NULL, NULL);
@@ -217,9 +196,27 @@ int main(void)
     err = clEnqueueReadBuffer(_queue, _buf, CL_TRUE, 0, size(), &output[0], 0, NULL, NULL);
     write(_bak_file_name, output);
 
-    // check the results
-    std::cout << "SQER:   " << signal_to_quant_error(input, output) << std::endl;
-    std::cout << "RMS:    " << rms(input, output) << std::endl; 
+    return signal_to_quant_error(input, output);
+}
+
+int main(void)
+{
+   
+    float_v      input(_fft_size);
+    float_v      output(_fft_size);
+    cl_event     event = NULL;
+    int          ret = 0;
+
+    // setup OpenCL & clFFT
+    cl_init();
+
+    // populate data
+    populate(_fft_size, input);
+    write(_data_file_name, input);
+
+    // FFT
+    float sqer = basic_fft(input, output);
+    std::cout << "SQER:   " << sqer << std::endl;
 
     // Release resources
     input.empty();
