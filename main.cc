@@ -2,6 +2,7 @@
 #include <iostream>
 #include <fstream>
 #include <random>
+#include <chrono>
 #include <math.h>
 
 #include <boost/program_options.hpp>
@@ -9,7 +10,10 @@
 // No need to explicitely include the OpenCL headers 
 #include <clFFT.h>
 
-typedef std::vector<float> float_v;
+using namespace std::chrono;
+
+typedef std::vector<float>                  float_v;
+typedef high_resolution_clock::time_point   time_pt;
 
 const char*         _data_file_name = "fft-data.txt";
 const char*         _fft_file_name  = "fft-forward.txt";
@@ -175,11 +179,10 @@ void cl_release() {
 }
 
 size_t size() {
-    //return _fft_size * 2 * sizeof(float);
     return _fft_size * sizeof(float);
 }
 
-float basic_fft(float_v& input, float_v& output) {
+float fft_to_file(float_v& input, float_v& output) {
     cl_int                  err;
 
     // Make data accessable by OpenCL
@@ -208,10 +211,58 @@ float basic_fft(float_v& input, float_v& output) {
     return signal_to_quant_error(input, output);
 }
 
-void fft_test() {
+void timed_fft(float_v& input, float_v& output) {
+
+    // Make data accessable by OpenCL
+    clEnqueueWriteBuffer(_queue, _buf, CL_TRUE, 0, size(), &input[0], 0, NULL, NULL);
+
+    // Execute the plan. 
+    clfftEnqueueTransform(_plan_forward, CLFFT_FORWARD, 1, &_queue, 0, NULL, NULL, &_buf, NULL, NULL);
+
+    // Wait for calculations to be finished. 
+    clFinish(_queue);
+
+    // Fetch results of calculations. 
+    clEnqueueReadBuffer(_queue, _buf, CL_TRUE, 0, size(), &output[0], 0, NULL, NULL);
+}
+
+void time_fft() {   
+    float_v input(_fft_size);
+    float_v      output(_fft_size);
+    
+    // setup OpenCL & clFFT
+    cl_init();
+
+    // populate data   
+    populate(_fft_size, input);
+    
+    // time FFT
+    time_pt start = high_resolution_clock::now();
+    for (int i = 0; i < _iterations; ++i) {
+        timed_fft(input, output);
+    }    
+    time_pt stop = high_resolution_clock::now();
+    
+    // compute and report times
+    auto total = stop - start;
+    nanoseconds dur = duration_cast<nanoseconds>(total);
+    
+    double ave = dur.count() / _iterations;
+
+    std::cout << "Iterations: " << _iterations << std::endl;
+    std::cout << "Total:      " << dur.count() << " ns (" << (dur.count() / 1000.0) 
+              << " μs)" << std::endl;
+    std::cout << "Average:    " << ave << " ns (" << (ave / 1000.0) << " μs)" << std::endl;
+
+    // Release resources
+    input.empty();
+    output.empty();
+    cl_release();
+}
+
+void test_fft() {
     float_v      input(_fft_size);
     float_v      output(_fft_size);
-    cl_event     event = NULL;
 
     // setup OpenCL & clFFT
     cl_init();
@@ -221,7 +272,7 @@ void fft_test() {
     write(_data_file_name, input);
 
     // FFT
-    float sqer = basic_fft(input, output);
+    float sqer = fft_to_file(input, output);
     std::cout << "SQER:   " << sqer << std::endl;
 
     // Release resources
@@ -232,7 +283,8 @@ void fft_test() {
 
 int main(int ac, char* av[])
 {
-    int          ret = 0;
+    int  ret = 0;
+    bool time = false;
 
     try {
         
@@ -248,7 +300,8 @@ int main(int ac, char* av[])
         ("random,r",       "Use a gaussian distributed random data set")
         ("mean,m",         po::value<double>(), "Mean for random data")
         ("deviation,d",    po::value<double>(), "Standard deviation for random data")
-        
+
+        ("time,t",         "Time the FFT")        
         ("iterations,i",   po::value<long>(), "Set the number of iterations to perform");        
 
         po::variables_map vm;
@@ -283,6 +336,10 @@ int main(int ac, char* av[])
             _std = vm["deviation"].as<double>();
         }
         
+        if (vm.count("time")) {
+            time = true;
+        }
+        
         if (vm.count("iterations")) {
             _iterations = vm["iterations"].as<long>();
         }
@@ -295,7 +352,10 @@ int main(int ac, char* av[])
         return 1;
     }
     
-    fft_test();
+    if (time)
+       time_fft();
+    else
+       test_fft();
     
     return ret;
 }
