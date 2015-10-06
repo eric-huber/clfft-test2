@@ -4,25 +4,31 @@
 #include <random>
 #include <math.h>
 
+#include <boost/program_options.hpp>
+
 // No need to explicitely include the OpenCL headers 
 #include <clFFT.h>
 
-const char* _data_file_name = "fft-data.txt";
-const char* _fft_file_name  = "fft-forward.txt";
-const char* _bak_file_name  = "fft-backward.txt";
-
 typedef std::vector<float> float_v;
 
-size_t              _fft_size = 8192;
+const char*         _data_file_name = "fft-data.txt";
+const char*         _fft_file_name  = "fft-forward.txt";
+const char*         _bak_file_name  = "fft-backward.txt";
 
-float               _mean = 0.5;
-float               _std = 0.2;
+bool                _use_cpu = false;
+size_t              _fft_size = 8192;
+bool                _use_periodic = false;
+double              _mean = 0.5;
+double              _std  = 0.2;
+long                _iterations = 1000;
 
 cl_context          _ctx = NULL;
 cl_command_queue    _queue = NULL;
 clfftPlanHandle     _plan_forward;
 clfftPlanHandle     _plan_backward;
 cl_mem              _buf;
+
+namespace po = boost::program_options;
 
 void populate_random(size_t size, float_v& buf) {
     std::default_random_engine      generator(std::random_device{}());
@@ -47,8 +53,10 @@ void populate_periodic(size_t size, float_v& buf) {
 }
 
 void populate(size_t size, float_v& buf) {
-    //populate_random(size, buf);
-    populate_periodic(size, buf);
+    if (_use_periodic)
+        populate_periodic(size, buf);
+    else
+        populate_random(size, buf);
 }
 
 float signal_energy(float_v& input) {
@@ -110,7 +118,8 @@ void cl_init() {
 
     // Setup OpenCL environment. 
     err = clGetPlatformIDs(1, &platform, NULL);
-    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    err = clGetDeviceIDs(platform, _use_cpu ? CL_DEVICE_TYPE_CPU : CL_DEVICE_TYPE_GPU, 
+                         1, &device, NULL);
 
     props[1] = (cl_context_properties)platform;
     _ctx = clCreateContext(props, 1, &device, NULL, NULL, &err);
@@ -199,13 +208,10 @@ float basic_fft(float_v& input, float_v& output) {
     return signal_to_quant_error(input, output);
 }
 
-int main(void)
-{
-   
+void fft_test() {
     float_v      input(_fft_size);
     float_v      output(_fft_size);
     cl_event     event = NULL;
-    int          ret = 0;
 
     // setup OpenCL & clFFT
     cl_init();
@@ -221,7 +227,75 @@ int main(void)
     // Release resources
     input.empty();
     output.empty();
-    cl_release();
+    cl_release();  
+}
 
+int main(int ac, char* av[])
+{
+    int          ret = 0;
+
+    try {
+        
+        po::options_description desc("Allowed options");
+    
+        desc.add_options()
+        ("help,h",         "Produce help message")
+        ("cpu,c",          "Force CPU usage")
+        
+        ("size,s",         po::value<int>(), "Set the size of the buffer [8192]")
+       
+        ("periodic,p",     "Use a periodic data set")
+        ("random,r",       "Use a gaussian distributed random data set")
+        ("mean,m",         po::value<double>(), "Mean for random data")
+        ("deviation,d",    po::value<double>(), "Standard deviation for random data")
+        
+        ("iterations,i",   po::value<long>(), "Set the number of iterations to perform");        
+
+        po::variables_map vm;
+        po::store(po::parse_command_line(ac, av, desc), vm);
+        po::notify(vm);
+
+        if (vm.count("help")) {
+            std::cout << desc << "\n";
+            return 1;
+        }
+        
+        if (vm.count("cpu")) {
+            _use_cpu = true;
+        }
+        
+        if (vm.count("size")) {
+            _fft_size = vm["size"].as<int>();
+        }
+                
+        if (vm.count("periodic")) {
+            _use_periodic = true;
+        }
+        
+        if (vm.count("random")) {
+        }
+        
+        if (vm.count("mean")) {
+            _mean = vm["mean"].as<double>();
+        }
+
+        if (vm.count("deviation")) {
+            _std = vm["deviation"].as<double>();
+        }
+        
+        if (vm.count("iterations")) {
+            _iterations = vm["iterations"].as<long>();
+        }
+
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
+    } catch (...) {
+        std::cerr << "Unknown error" << std::endl;
+        return 1;
+    }
+    
+    fft_test();
+    
     return ret;
 }
